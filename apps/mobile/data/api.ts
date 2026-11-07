@@ -143,8 +143,8 @@ const API_URL = process.env.EXPO_PUBLIC_API_URL;
 
 if (!API_URL) {
   throw new Error(
-    "EXPO_PUBLIC_API_URL is not set. Add it to apps/mobile/.env.development.local " +
-      "(see apps/mobile/.env.staging for an example).",
+    "EXPO_PUBLIC_API_URL is not set. Add it to the apps/mobile env file for " +
+      "the variant you are running (see apps/mobile/README.md).",
   );
 }
 
@@ -579,8 +579,9 @@ class ApiClient {
     });
   }
 
-  async listAgents(opts?: { signal?: AbortSignal }): Promise<Agent[]> {
-    const raw = await this.fetch<unknown>("/api/agents", {
+  async listAgents(opts?: { signal?: AbortSignal; includeArchived?: boolean }): Promise<Agent[]> {
+    const path = opts?.includeArchived ? "/api/agents?include_archived=true" : "/api/agents";
+    const raw = await this.fetch<unknown>(path, {
       signal: opts?.signal,
     });
     return parseWithFallback(raw, AgentListSchema, EMPTY_AGENT_LIST, {

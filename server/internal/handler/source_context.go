@@ -690,6 +690,10 @@ func (h *Handler) createManualCommentSubIssue(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return errSourceContextResponseWritten
 	}
+	properties, ok := parseIssueCreateProperties(w, input.Properties)
+	if !ok {
+		return errSourceContextResponseWritten
+	}
 	var startDate, dueDate pgtype.Date
 	if input.StartDate != nil && *input.StartDate != "" {
 		parsed, err := util.ParseCalendarDate(*input.StartDate)
@@ -720,8 +724,9 @@ func (h *Handler) createManualCommentSubIssue(w http.ResponseWriter, r *http.Req
 		WorkspaceID: workspaceID, Title: title, Description: ptrToText(input.Description), Status: status, Priority: priority,
 		AssigneeType: assigneeType, AssigneeID: assigneeID, CreatorType: "member", CreatorID: userID,
 		ParentIssueID: capture.SourceIssueID, ProjectID: projectID, StartDate: startDate, DueDate: dueDate,
-		AttachmentIDs: attachmentIDs, LabelIDs: labelIDs, Stage: stage,
+		AttachmentIDs: attachmentIDs, LabelIDs: labelIDs, Properties: properties, Stage: stage,
 		AllowDuplicate: input.AllowDuplicate, SourceContext: &capture,
+		PRAutoCompleteDisabled: input.PRAutoCompleteDisabled,
 	}, service.IssueCreateOpts{
 		ActorID: util.UUIDToString(userID),
 		BroadcastPayload: func(issue db.Issue, _ []db.Attachment, labels []db.IssueLabel) map[string]any {
@@ -739,7 +744,10 @@ func (h *Handler) createManualCommentSubIssue(w http.ResponseWriter, r *http.Req
 	labelResponses := labelsToResponse(result.Labels)
 	response.Labels = &labelResponses
 	slog.Info("sub-issue created from captured comment", append(sourceContextAuditAttrs(r, capture.ID, capture.Snapshot.SourceIssue.ID, capture.Snapshot.AnchorCommentID, userID, "manual", limits, "success"), "target_issue_id", uuidToString(result.Issue.ID))...)
-	writeJSON(w, http.StatusCreated, response)
+	if input.PRAutoCompleteDisabled {
+		h.recordPRAutoCompleteActivity(r.Context(), result.Issue, "member", uuidToString(userID), true)
+	}
+	writeJSON(w, http.StatusCreated, CreateIssueResponse{IssueResponse: response, PRAutoCompleteDisabled: input.PRAutoCompleteDisabled})
 	return nil
 }
 
@@ -868,6 +876,7 @@ func (h *Handler) writeSourceContextError(w http.ResponseWriter, err error, limi
 	status := http.StatusInternalServerError
 	code := "source_context_capture_failed"
 	message := "failed to capture source context"
+	var propertyErr *service.IssuePropertyValidationError
 	switch {
 	case errors.Is(err, service.ErrSourceContextChanged):
 		status, code = http.StatusConflict, "source_context_changed"
@@ -893,6 +902,12 @@ func (h *Handler) writeSourceContextError(w http.ResponseWriter, err error, limi
 	case errors.Is(err, service.ErrParentIssueNotFound), errors.Is(err, service.ErrProjectNotFound):
 		status = http.StatusBadRequest
 		message = err.Error()
+	case errors.As(err, &propertyErr):
+		status, code = http.StatusBadRequest, "invalid_issue_property"
+		message = propertyErr.Message
+	case errors.Is(err, service.ErrIssuePropertiesTooLarge):
+		status, code = http.StatusBadRequest, "issue_properties_too_large"
+		message = err.Error()
 	case errors.Is(err, errSourceContextBadRequest):
 		status, code = http.StatusBadRequest, "invalid_request"
 		message = err.Error()
@@ -900,6 +915,9 @@ func (h *Handler) writeSourceContextError(w http.ResponseWriter, err error, limi
 		return
 	}
 	payload := map[string]any{"code": code, "error": message}
+	if propertyErr != nil {
+		payload["property_id"] = propertyErr.PropertyID
+	}
 	if errors.Is(err, service.ErrSourceContextTooLarge) {
 		payload["limits"] = limits
 	}
